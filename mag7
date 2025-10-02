@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>美股七巨頭報酬率分析工具</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/recharts@2.5.0/dist/Recharts.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState } = React;
+    const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+
+    const Mag7ReturnsTracker = () => {
+      const [selectedYear, setSelectedYear] = useState('2024');
+      const [selectedMonth, setSelectedMonth] = useState('9');
+      const [loading, setLoading] = useState(false);
+      const [data, setData] = useState(null);
+      const [error, setError] = useState(null);
+      const apiKey = '7xTUMOCGtNmymONqH2VM2i1OJE4qAU47';
+
+      const mag7Stocks = [
+        { symbol: 'AAPL', name: 'Apple' },
+        { symbol: 'MSFT', name: 'Microsoft' },
+        { symbol: 'GOOGL', name: 'Alphabet' },
+        { symbol: 'AMZN', name: 'Amazon' },
+        { symbol: 'NVDA', name: 'NVIDIA' },
+        { symbol: 'TSLA', name: 'Tesla' },
+        { symbol: 'META', name: 'Meta' }
+      ];
+
+      const years = ['2020', '2021', '2022', '2023', '2024'];
+      const months = [
+        { value: '1', label: '1月' }, { value: '2', label: '2月' },
+        { value: '3', label: '3月' }, { value: '4', label: '4月' },
+        { value: '5', label: '5月' }, { value: '6', label: '6月' },
+        { value: '7', label: '7月' }, { value: '8', label: '8月' },
+        { value: '9', label: '9月' }, { value: '10', label: '10月' },
+        { value: '11', label: '11月' }, { value: '12', label: '12月' }
+      ];
+
+      const formatDate = (year, month, day) => {
+        const m = String(month).padStart(2, '0');
+        const d = String(day).padStart(2, '0');
+        return `${year}-${m}-${d}`;
+      };
+
+      const getLastDayOfMonth = (year, month) => {
+        return new Date(year, month, 0).getDate();
+      };
+
+      const getPreviousMonthEnd = (year, month) => {
+        const prevMonth = month === 1 ? 12 : month - 1;
+        const prevYear = month === 1 ? year - 1 : year;
+        const lastDay = getLastDayOfMonth(prevYear, prevMonth);
+        return formatDate(prevYear, prevMonth, lastDay);
+      };
+
+      const getYearStart = (year) => {
+        return formatDate(year - 1, 12, 31);
+      };
+
+      const fetchStockPrice = async (symbol, targetDate) => {
+        try {
+          const target = new Date(targetDate);
+          const fromDate = new Date(target);
+          fromDate.setDate(fromDate.getDate() - 15);
+          
+          const fromStr = fromDate.toISOString().split('T')[0];
+          const toStr = target.toISOString().split('T')[0];
+          
+          const url = `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?from=${fromStr}&to=${toStr}&apikey=${apiKey}`;
+          
+          const response = await fetch(url);
+          
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          
+          const json = await response.json();
+
+          if (json.historical && json.historical.length > 0) {
+            const sortedData = json.historical.sort((a, b) => new Date(b.date) - new Date(a.date));
+            return sortedData[0].close;
+          }
+          
+          throw new Error('無法獲取股價數據');
+        } catch (err) {
+          console.error(`獲取 ${symbol} 股價失敗:`, err);
+          throw err;
+        }
+      };
+
+      const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+      const handleQuery = async () => {
+        setLoading(true);
+        setError(null);
+        setData(null);
+
+        try {
+          const year = parseInt(selectedYear);
+          const month = parseInt(selectedMonth);
+          
+          const lastDay = getLastDayOfMonth(year, month);
+          const currentMonthEnd = formatDate(year, month, lastDay);
+          const previousMonthEnd = getPreviousMonthEnd(year, month);
+          const yearStart = getYearStart(year);
+
+          const results = [];
+          let successCount = 0;
+          let failedStocks = [];
+
+          for (let i = 0; i < mag7Stocks.length; i++) {
+            const stock = mag7Stocks[i];
+            
+            try {
+              const currentPrice = await fetchStockPrice(stock.symbol, currentMonthEnd);
+              await delay(300);
+              
+              const prevMonthPrice = await fetchStockPrice(stock.symbol, previousMonthEnd);
+              await delay(300);
+              
+              const yearStartPrice = await fetchStockPrice(stock.symbol, yearStart);
+              await delay(300);
+
+              const monthlyReturn = ((currentPrice - prevMonthPrice) / prevMonthPrice * 100);
+              const ytdReturn = ((currentPrice - yearStartPrice) / yearStartPrice * 100);
+
+              results.push({
+                symbol: stock.symbol,
+                name: stock.name,
+                monthlyReturn: monthlyReturn.toFixed(2),
+                ytdReturn: ytdReturn.toFixed(2),
+                currentPrice: currentPrice.toFixed(2),
+                prevMonthPrice: prevMonthPrice.toFixed(2),
+                yearStartPrice: yearStartPrice.toFixed(2)
+              });
+
+              successCount++;
+
+            } catch (err) {
+              console.error(`處理 ${stock.symbol} 時發生錯誤:`, err);
+              failedStocks.push(stock.symbol);
+              results.push({
+                symbol: stock.symbol,
+                name: stock.name,
+                monthlyReturn: 'N/A',
+                ytdReturn: 'N/A',
+                currentPrice: 'N/A',
+                prevMonthPrice: 'N/A',
+                yearStartPrice: 'N/A'
+              });
+            }
+          }
+
+          setData(results);
+          
+          if (successCount === 0) {
+            setError('所有股票查詢失敗。請檢查網路連線或稍後再試。');
+          } else if (failedStocks.length > 0) {
+            setError(`部分股票查詢失敗: ${failedStocks.join(', ')}。其他股票數據正常顯示。`);
+          }
+
+        } catch (err) {
+          setError('查詢失敗，請檢查網路連線或稍後再試');
+          console.error('查詢錯誤:', err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const exportToCSV = () => {
+        if (!data) return;
+
+        const headers = ['股票代碼', '股票名稱', '月度報酬率(%)', 'YTD報酬率(%)', '當前價格($)', '上月價格($)', '年初價格($)'];
+        const csvContent = [
+          headers.join(','),
+          ...data.map(row => 
+            `${row.symbol},${row.name},${row.monthlyReturn},${row.ytdReturn},${row.currentPrice},${row.prevMonthPrice},${row.yearStartPrice}`
+          )
+        ].join('\\n');
+
+        const blob = new Blob(['\\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Mag7_Returns_${selectedYear}_${selectedMonth}.csv`;
+        link.click();
+      };
+
+      const chartData = data?.filter(item => item.monthlyReturn !== 'N/A').map(item => ({
+        name: item.symbol,
+        月度: parseFloat(item.monthlyReturn),
+        YTD: parseFloat(item.ytdReturn)
+      }));
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+          <div className="max-w-7xl mx-auto">
+            <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
+              <div className="flex items-center gap-3 mb-2">
+                <svg className="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                </svg>
+                <h1 className="text-3xl font-bold text-gray-800">美股七巨頭報酬率分析</h1>
+              </div>
+              <p className="text-gray-600">查詢 Magnificent 7 的月度及年初至今報酬率（真實股價數據）</p>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
+              <div className="flex items-center gap-4 mb-4">
+                <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <h2 className="text-xl font-semibold text-gray-800">選擇查詢期間</h2>
+              </div>
+              
+              <div className="flex flex-wrap gap-4 items-end">
+                <div className="flex-1 min-w-[150px]">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">年份</label>
+                  <select 
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                    disabled={loading}
+                  >
+                    {years.map(year => (
+                      <option key={year} value={year}>{year}年</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex-1 min-w-[150px]">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">月份</label>
+                  <select 
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                    disabled={loading}
+                  >
+                    {months.map(month => (
+                      <option key={month.value} value={month.value}>{month.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={handleQuery}
+                  disabled={loading}
+                  className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
+                >
+                  {loading ? '查詢中...' : '查詢報酬率'}
+                </button>
+
+                {data && (
+                  <button
+                    onClick={exportToCSV}
+                    className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium"
+                  >
+                    匯出CSV
+                  </button>
+                )}
+              </div>
+
+              {loading && (
+                <div className="mt-4 flex items-center gap-2 text-indigo-600">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-indigo-600"></div>
+                  <span>正在從 Financial Modeling Prep 獲取真實股價數據...</span>
+                </div>
+              )}
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
+                <p className="text-red-800 font-medium">{error}</p>
+              </div>
+            )}
+
+            {data && (
+              <>
+                <div className="bg-white rounded-xl shadow-lg p-6 mb-6 overflow-x-auto">
+                  <h2 className="text-xl font-semibold text-gray-800 mb-4">
+                    {selectedYear}年{selectedMonth}月報酬率數據
+                  </h2>
+                  <table className="w-full">
+                    <thead>
+                      <tr className="bg-indigo-50 border-b-2 border-indigo-200">
+                        <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">股票代號</th>
+                        <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">公司名稱</th>
+                        <th className="px-4 py-3 text-right text-sm font-semibold text-gray-700">當前價格 ($)</th>
+                        <th className="px-4 py-3 text-right text-sm font-semibold text-gray-700">月度報酬率 (%)</th>
+                        <th className="px-4 py-3 text-right text-sm font-semibold text-gray-700">YTD報酬率 (%)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.map((row, index) => (
+                        <tr key={row.symbol} className={index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}>
+                          <td className="px-4 py-3 font-mono font-semibold text-indigo-600">{row.symbol}</td>
+                          <td className="px-4 py-3 text-gray-700">{row.name}</td>
+                          <td className="px-4 py-3 text-right text-gray-700">
+                            {row.currentPrice !== 'N/A' ? `$${row.currentPrice}` : 'N/A'}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-semibold ${
+                            row.monthlyReturn === 'N/A' ? 'text-gray-400' :
+                            parseFloat(row.monthlyReturn) >= 0 ? 'text-green-600' : 'text-red-600'
+                          }`}>
+                            {row.monthlyReturn !== 'N/A' && parseFloat(row.monthlyReturn) >= 0 ? '+' : ''}{row.monthlyReturn}
+                            {row.monthlyReturn !== 'N/A' && '%'}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-semibold ${
+                            row.ytdReturn === 'N/A' ? 'text-gray-400' :
+                            parseFloat(row.ytdReturn) >= 0 ? 'text-green-600' : 'text-red-600'
+                          }`}>
+                            {row.ytdReturn !== 'N/A' && parseFloat(row.ytdReturn) >= 0 ? '+' : ''}{row.ytdReturn}
+                            {row.ytdReturn !== 'N/A' && '%'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {chartData && chartData.length > 0 && (
+                  <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
+                    <h2 className="text-xl font-semibold text-gray-800 mb-4">報酬率比較圖</h2>
+                    <ResponsiveContainer width="100%" height={400}>
+                      <LineChart data={chartData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Line type="monotone" dataKey="月度" stroke="#8b5cf6" strokeWidth={2} name="月度報酬率" />
+                        <Line type="monotone" dataKey="YTD" stroke="#3b82f6" strokeWidth={2} name="YTD報酬率" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                  <h3 className="font-semibold text-green-900 mb-2">✓ 真實數據說明</h3>
+                  <ul className="text-sm text-green-800 space-y-1">
+                    <li>• <strong>數據來源：</strong>Financial Modeling Prep（專業金融數據供應商）</li>
+                    <li>• <strong>月度報酬率：</strong>前一個月最後交易日收盤價 → 本月最後交易日收盤價</li>
+                    <li>• <strong>YTD報酬率：</strong>前一年最後交易日收盤價 → 本月最後交易日收盤價</li>
+                    <li>• <strong>數據準確性：</strong>所有數據均為真實歷史股價，無任何模擬或估算</li>
+                  </ul>
+                </div>
+              </>
+            )}
+
+            {!data && !loading && (
+              <div className="bg-white rounded-xl shadow-lg p-12 text-center">
+                <svg className="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                </svg>
+                <h3 className="text-xl text-gray-600 mb-2">準備就緒！</h3>
+                <p className="text-gray-500">選擇年份和月份後開始查詢真實股價數據</p>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<Mag7ReturnsTracker />, document.getElementById('root'));
+  </script>
+</body>
+</html>
