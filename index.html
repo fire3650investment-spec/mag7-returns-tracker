@@ -63,61 +63,81 @@ const Mag7ReturnsTracker = () => {
     return formatDate(year - 1, 12, 31);
   };
 
-  // 從 Financial Modeling Prep API 獲取歷史股價
+  // 從 Financial Modeling Prep API 獲取歷史股價（改進版）
   const fetchHistoricalPrice = async (symbol, fromDate, toDate, key) => {
     try {
       const url = `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?from=${fromDate}&to=${toDate}&apikey=${key}`;
       
+      console.log(`正在查詢 ${symbol}: ${url}`);
+      
       const response = await fetch(url);
       
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
       
       const json = await response.json();
+      
+      // 檢查API返回的錯誤訊息
+      if (json.Error) {
+        throw new Error(json.Error);
+      }
 
       if (json.historical && json.historical.length > 0) {
         // 返回最接近目標日期的收盤價（通常是陣列的第一個）
         return json.historical[0].close;
       }
       
-      throw new Error('無法獲取股價數據');
+      throw new Error('無歷史數據');
     } catch (err) {
       console.error(`獲取${symbol}股價失敗:`, err);
       throw err;
     }
   };
 
-  // 尋找最接近目標日期的交易日價格
+  // 尋找最接近目標日期的交易日價格（使用CORS代理）
   const findClosestPrice = async (symbol, targetDate, key) => {
     try {
-      // 往前找10天的數據，確保能找到交易日
+      // 往前找15天的數據，確保能找到交易日
       const target = new Date(targetDate);
       const fromDate = new Date(target);
-      fromDate.setDate(fromDate.getDate() - 10);
+      fromDate.setDate(fromDate.getDate() - 15);
       
       const fromStr = fromDate.toISOString().split('T')[0];
       const toStr = target.toISOString().split('T')[0];
       
-      const url = `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?from=${fromStr}&to=${toStr}&apikey=${key}`;
+      // 使用 CORS 代理
+      const apiUrl = `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?from=${fromStr}&to=${toStr}&apikey=${key}`;
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(apiUrl)}`;
       
-      const response = await fetch(url);
+      console.log(`查詢 ${symbol} (${toStr})`);
+      
+      const response = await fetch(proxyUrl);
       
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error(`API錯誤 (${symbol}):`, response.status, errorText);
+        throw new Error(`API錯誤 ${response.status}`);
       }
       
       const json = await response.json();
+      
+      // 檢查API返回的錯誤
+      if (json.Error || json.error) {
+        throw new Error(json.Error || json.error || '未知錯誤');
+      }
 
       if (json.historical && json.historical.length > 0) {
         // 返回最接近目標日期且不晚於目標日期的價格
         const sortedData = json.historical.sort((a, b) => new Date(b.date) - new Date(a.date));
+        console.log(`${symbol} 找到 ${sortedData.length} 筆數據，最近日期: ${sortedData[0].date}, 價格: ${sortedData[0].close}`);
         return sortedData[0].close;
       }
       
-      throw new Error('無法獲取股價數據');
+      throw new Error(`無法獲取 ${targetDate} 附近的數據`);
     } catch (err) {
-      console.error(`獲取${symbol}股價失敗:`, err);
+      console.error(`獲取${symbol}股價失敗:`, err.message);
       throw err;
     }
   };
@@ -196,9 +216,9 @@ const Mag7ReturnsTracker = () => {
       setData(results);
       
       if (successCount === 0) {
-        setError('所有股票查詢失敗。請檢查 API Key 是否正確，或是否已達免費額度限制（每日250次）。');
+        setError('所有股票查詢失敗。可能原因：(1) API Key 錯誤 (2) 已達免費額度限制（每日250次）(3) 查詢的日期沒有交易數據。請檢查瀏覽器控制台(F12)查看詳細錯誤訊息。');
       } else if (failedStocks.length > 0) {
-        setError(`部分股票查詢失敗: ${failedStocks.join(', ')}。其他股票數據正常顯示。`);
+        setError(`部分股票查詢失敗: ${failedStocks.join(', ')}。請檢查瀏覽器控制台(F12)查看詳細錯誤訊息。`);
       }
 
     } catch (err) {
