@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>美股七巨頭報酬追蹤（單月 / YTD）</title>
+  <title>美股七巨頭單月報酬追蹤</title>
+  <!-- 使用 Chart.js CDN（UMD 版本，無須 React / Babel） -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
     :root { color-scheme: light dark; }
@@ -15,12 +16,12 @@
     #status { min-height: 1.5em; margin: 8px 0 16px; color: #666; }
     #status.ok { color: #0a7b58; }
     #status.error { color: #b00020; }
-    canvas { max-width: 100%; height: 460px; }
+    canvas { max-width: 100%; height: 440px; }
     .note { font-size: 12px; color: #888; margin-top: 8px; }
   </style>
 </head>
 <body>
-  <h1>美股七巨頭報酬追蹤</h1>
+  <h1>美股七巨頭單月報酬追蹤</h1>
 
   <div class="row">
     <label for="yearSelect">年份</label>
@@ -29,221 +30,159 @@
     <label for="monthSelect">月份</label>
     <select id="monthSelect"></select>
 
-    <label for="modeSelect">顯示</label>
-    <select id="modeSelect">
-      <option value="monthly">單月報酬</option>
-      <option value="ytd">年初至今（YTD）</option>
-    </select>
-
     <button id="runBtn" type="button">查詢</button>
   </div>
 
-  <div id="status">請選擇年份、月份與顯示類型後按「查詢」。</div>
-  <canvas id="chart"></canvas>
-  <div class="note">資料來源：Financial Modeling Prep（免費額度約 250 次/日）。正式上線請改走後端 Proxy 隱藏 API Key。</div>
+  <div id="status">請選擇年份與月份後按「查詢」。</div>
 
+  <canvas id="chart"></canvas>
+  <div class="note">提示：先以 DEMO 資料繪圖確認畫面正常；欲接真實 API，請見程式內註解。</div>
+
+  <!-- 不用 type="module"，避免模組載入問題；把腳本放在 body 末端確保 DOM 已就緒 -->
   <script>
-    // ===== 基本設定 =====
-    const DEMO_MODE = false; // true = 用假資料；false = 連 FMP
-    const API_KEY = "7xTUMOCGtNmymONqH2VM2i1OJE4qAU47";
-    const FMP_BASE = "https://financialmodelingprep.com/api/v3";
+    // ========= 基本設定 =========
+    const DEMO_MODE = true; // ✅ 先用假資料跑畫面；接 API 時改成 false，並實作 fetchStock()
     const TICKERS = ["AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META"];
 
-    const yearSelect  = document.getElementById("yearSelect");
+    const yearSelect = document.getElementById("yearSelect");
     const monthSelect = document.getElementById("monthSelect");
-    const modeSelect  = document.getElementById("modeSelect");
-    const runBtn      = document.getElementById("runBtn");
-    const statusEl    = document.getElementById("status");
-    const chartEl     = document.getElementById("chart");
+    const runBtn = document.getElementById("runBtn");
+    const statusEl = document.getElementById("status");
+    const chartEl = document.getElementById("chart");
 
-    // 快取：避免切換顯示時重抓
-    // cache[key] = { rows: [{ticker, monthPct, ytdPct}], labelMonth, labelYTD }
-    const cache = new Map();
-
+    // ========= UI 初始化 =========
     (function initUI(){
       const now = new Date();
       const thisYear = now.getUTCFullYear();
+      // 年份：近 12 年
       for (let y = thisYear; y >= thisYear - 11; y--) {
         const opt = document.createElement("option");
         opt.value = String(y);
         opt.textContent = String(y);
         yearSelect.appendChild(opt);
       }
+      // 月份：01~12
       for (let m = 1; m <= 12; m++) {
         const opt = document.createElement("option");
         opt.value = String(m).padStart(2, "0");
         opt.textContent = String(m);
         monthSelect.appendChild(opt);
       }
-      // 預設上個月
+      // 預設：上個月
       const prev = new Date(Date.UTC(thisYear, now.getUTCMonth() - 1, 1));
-      yearSelect.value  = String(prev.getUTCFullYear());
+      yearSelect.value = String(prev.getUTCFullYear());
       monthSelect.value = String(prev.getUTCMonth() + 1).padStart(2, "0");
     })();
 
-    function ymdUTC(year, month /*1-12*/, day){
+    // ========= 日期工具（避免 '2025-9-1' 解析歧義） =========
+    function ymdUTC(year, month /*1-12*/, day) {
       return new Date(Date.UTC(year, month - 1, day));
     }
-    function getMonthRangeISO(year, month /*"01"~"12"*/){
+    function getMonthRangeISO(year, month /*"01"~"12"*/) {
       const y = Number(year);
       const m = Number(month);
       const start = ymdUTC(y, m, 1);
-      const end   = ymdUTC(y, m + 1, 1); // 自動跨年
+      const end = ymdUTC(y, m + 1, 1); // 自動處理跨年
       return {
-        startISO: start.toISOString().slice(0,10),
-        endISO: end.toISOString().slice(0,10)
+        startISO: start.toISOString().slice(0, 10),
+        endISO: end.toISOString().slice(0, 10)
       };
     }
-    function getYearStartISO(year){
-      return ymdUTC(Number(year), 1, 1).toISOString().slice(0,10);
-    }
 
-    // ===== 單檔取價（抓 1/1 ~ 月底全部日資料，一次算出 單月 & YTD）=====
-    async function fetchStockBoth(ticker, year, month){
-      if (DEMO_MODE){
-        // 穩定假資料
-        const { startISO, endISO } = getMonthRangeISO(year, month);
-        const seedBase = Array.from(ticker + startISO).reduce((s,c)=>s+c.charCodeAt(0),0);
-        const base = 120 + (seedBase % 80); // 120~199
-        const monthPct = ((seedBase % 21) - 10) / 100; // -10%~+10%
-        const seedY = Array.from(ticker + year).reduce((s,c)=>s+c.charCodeAt(0),0);
-        const ytdPct = ((seedY % 41) - 20) / 100; // -20%~+20%
-        return { ticker, monthPct, ytdPct };
+    // ========= 取得單檔股票月初/月底收盤（請在這裡接你的 API） =========
+    async function fetchStock(ticker, startISO, endISO) {
+      if (DEMO_MODE) {
+        // 產生穩定假資料（方便先看畫面）
+        const seed = Array.from(ticker + startISO).reduce((s, c) => s + c.charCodeAt(0), 0);
+        const base = 120 + (seed % 80);                // 120~199
+        const pct = ((seed % 21) - 10) / 100;          // -10% ~ +10%
+        return { ticker, startClose: base, endClose: base * (1 + pct), pct };
       }
 
-      const { endISO } = getMonthRangeISO(year, month);
-      const yearStartISO = getYearStartISO(year);
+      // --- 實作你自己的 API ---
+      // 例：以你自建的 proxy 取某 API 的月初/月底收盤價
+      // const url = `https://your-proxy.example.com/price-range?ticker=${encodeURIComponent(ticker)}&start=${startISO}&end=${endISO}`;
+      // const res = await fetch(url, { headers: { 'Authorization': `Bearer ${YOUR_TOKEN}` }});
+      // if (!res.ok) throw new Error(`${ticker} HTTP ${res.status}`);
+      // const data = await res.json();
+      // const pct = (data.endClose - data.startClose) / data.startClose;
+      // return { ticker, startClose: data.startClose, endClose: data.endClose, pct };
 
-      // 取該年到該月月底的所有歷史資料
-      const url = `${FMP_BASE}/historical-price-full/${encodeURIComponent(ticker)}?from=${yearStartISO}&to=${endISO}&apikey=${API_KEY}`;
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) throw new Error(`${ticker} HTTP ${res.status}`);
-      const json = await res.json();
-      const arr = Array.isArray(json?.historical) ? json.historical : [];
-      if (arr.length === 0) throw new Error(`${ticker} 無資料`);
-
-      // 由舊到新
-      arr.sort((a,b)=> a.date.localeCompare(b.date));
-
-      // 當月的第一個與最後一個交易日
-      const { startISO: mStartISO, endISO: mEndISO } = getMonthRangeISO(year, month);
-      const monthRows = arr.filter(d => d.date >= mStartISO && d.date < mEndISO);
-      if (monthRows.length === 0) throw new Error(`${ticker} 該月無交易資料`);
-
-      const monthFirst = monthRows[0];
-      const monthLast  = monthRows[monthRows.length - 1];
-      const monthStartClose = Number(monthFirst.close);
-      const monthEndClose   = Number(monthLast.close);
-
-      // 年初第一個交易日
-      const yearFirst = arr[0];
-      const ytdStartClose = Number(yearFirst.close);
-
-      if (![monthStartClose, monthEndClose, ytdStartClose].every(Number.isFinite)) {
-        throw new Error(`${ticker} 價格缺失`);
-      }
-
-      const monthPct = (monthEndClose - monthStartClose) / monthStartClose;
-      // YTD 到「該月最後交易日」
-      const ytdPct   = (monthEndClose - ytdStartClose) / ytdStartClose;
-
-      return { ticker, monthPct, ytdPct };
+      throw new Error("請先將 DEMO_MODE 設為 true，或實作 fetchStock() 的 API 取價邏輯。");
     }
 
-    async function fetchAllTickers(year, month){
-      const rows = [];
-      for (const t of TICKERS){
+    // ========= 批次查詢（含簡單節流與重試） =========
+    async function fetchAllWithThrottle(tickers, startISO, endISO) {
+      const out = [];
+      for (const t of tickers) {
         let tries = 0;
-        while(tries < 3){
+        while (tries < 3) {
           try {
-            if (tries === 0) await new Promise(r=>setTimeout(r, 200));
-            const r = await fetchStockBoth(t, year, month);
-            rows.push(r);
+            if (tries === 0) await new Promise(r => setTimeout(r, 200)); // 簡單節流
+            const row = await fetchStock(t, startISO, endISO);
+            out.push(row);
             break;
-          } catch (e){
+          } catch (e) {
             tries++;
             if (tries >= 3) throw new Error(`${t} 查詢失敗：${e.message}`);
-            await new Promise(r=>setTimeout(r, 500 * tries));
+            await new Promise(r => setTimeout(r, 500 * tries));
           }
         }
       }
-      rows.sort((a,b)=>a.ticker.localeCompare(b.ticker));
-      return rows;
+      return out;
     }
 
-    // ===== Chart.js 繪圖 =====
+    // ========= Chart.js 繪圖 =========
     let chart;
-    function renderChart(rows, year, month, mode /* 'monthly' | 'ytd' */){
-      const labels = rows.map(d=>d.ticker);
-      const data   = rows.map(d=>{
-        const pct = mode === 'monthly' ? d.monthPct : d.ytdPct;
-        return Number((pct * 100).toFixed(2));
-      });
-
-      const label = mode === 'monthly'
-        ? `${year}/${month} 單月報酬`
-        : `${year}/01~${month} 年初至今（YTD）`;
+    function renderChart(items, label) {
+      const labels = items.map(d => d.ticker);
+      const data = items.map(d => Number((d.pct * 100).toFixed(2)));
 
       if (chart) chart.destroy();
+
       const ctx = chartEl.getContext('2d');
       chart = new Chart(ctx, {
         type: 'bar',
-        data: { labels, datasets: [{ label, data }] },
+        data: {
+          labels,
+          datasets: [{ label, data }]
+        },
         options: {
           responsive: true,
-          scales: { y: { ticks: { callback: v => `${v}%` } } },
+          scales: {
+            y: {
+              ticks: { callback: (v) => `${v}%` }
+            }
+          },
           plugins: {
-            tooltip: { callbacks: { label: (c)=> `${c.parsed.y}%` } },
+            tooltip: {
+              callbacks: { label: (ctx) => `${ctx.parsed.y}%` }
+            },
             legend: { display: true }
           }
         }
       });
     }
 
-    function makeCacheKey(year, month){
-      return `${year}-${month}`;
-    }
-
-    async function handleQuery(){
-      const year  = yearSelect.value;
+    // ========= 事件：查詢 =========
+    runBtn.addEventListener("click", async () => {
+      const year = yearSelect.value;
       const month = monthSelect.value;
-      const mode  = modeSelect.value;
-      const key   = makeCacheKey(year, month);
+      const { startISO, endISO } = getMonthRangeISO(year, month);
 
       statusEl.className = "";
-      statusEl.textContent = "查詢中…";
+      statusEl.textContent = `查詢中… (${startISO} ~ ${endISO})`;
 
-      try{
-        let payload = cache.get(key);
-        if (!payload){
-          const rows = await fetchAllTickers(year, month);
-          payload = {
-            rows,
-            labelMonth: `${year}/${month} 單月報酬`,
-            labelYTD:   `${year}/01~${month} 年初至今（YTD）`
-          };
-          cache.set(key, payload);
-        }
-        renderChart(payload.rows, year, month, mode);
+      try {
+        const rows = await fetchAllWithThrottle(TICKERS, startISO, endISO);
+        rows.sort((a, b) => a.ticker.localeCompare(b.ticker));
+        renderChart(rows, `${year}/${month} 單月報酬`);
         statusEl.className = "ok";
         statusEl.textContent = "完成";
-      }catch(err){
+      } catch (err) {
         console.error(err);
         statusEl.className = "error";
         statusEl.textContent = `查詢失敗：${err.message}`;
-      }
-    }
-
-    runBtn.addEventListener("click", handleQuery);
-    // 切換顯示類型時，若該年月已有快取，直接重畫
-    modeSelect.addEventListener("change", ()=>{
-      const key = makeCacheKey(yearSelect.value, monthSelect.value);
-      const mode = modeSelect.value;
-      const payload = cache.get(key);
-      if (payload){
-        renderChart(payload.rows, yearSelect.value, monthSelect.value, mode);
-        statusEl.className = "ok";
-        statusEl.textContent = "完成（切換顯示）";
       }
     });
   </script>
