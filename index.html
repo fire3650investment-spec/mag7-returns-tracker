@@ -187,14 +187,17 @@
         if (!data) return;
 
         const headers = ['股票代碼', '股票名稱', '月度報酬率(%)', 'YTD報酬率(%)', '當前價格($)', '上月價格($)', '年初價格($)'];
-        const csvContent = [
+        const BOM = String.fromCharCode(0xfeff);
+        const newline = '\r\n';
+        const csvLines = [
           headers.join(','),
-          ...data.map(row => 
+          ...data.map(row =>
             row.symbol + ',' + row.name + ',' + row.monthlyReturn + ',' + row.ytdReturn + ',' + row.currentPrice + ',' + row.prevMonthPrice + ',' + row.yearStartPrice
           )
-        ].join('\\n');
+        ];
+        const csvContent = csvLines.join(newline);
 
-        const blob = new Blob(['\\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+        const blob = new Blob([BOM, csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         link.download = 'Mag7_Returns_' + selectedYear + '_' + selectedMonth + '.csv';
