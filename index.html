@@ -1,404 +1,194 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
+<!doctype html>
+<html lang="zh-Hant">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>美股七巨頭報酬率分析工具</title>
-  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/recharts@2.9.0/dist/Recharts.js"></script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>美股七巨頭單月報酬追蹤</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <!-- Chart.js CDN（HTTPS，避免混合內容） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, "Noto Sans TC", Arial, sans-serif; margin: 20px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    label { font-weight: 600; }
+    select, button { padding: 8px 10px; font-size: 14px; }
+    #status { margin-top: 10px; min-height: 1.5em; color: #666; }
+    #status.error { color: #b00020; }
+    #status.ok { color: #0b7; }
+    canvas { max-width: 100%; height: 420px; }
+  </style>
 </head>
 <body>
-  <div id="root"></div>
-  
-  <script type="text/babel">
-    const { useState } = React;
-    const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+  <h1>美股七巨頭單月報酬追蹤</h1>
 
-    const Mag7ReturnsTracker = () => {
-      const [selectedYear, setSelectedYear] = useState('2024');
-      const [selectedMonth, setSelectedMonth] = useState('9');
-      const [loading, setLoading] = useState(false);
-      const [data, setData] = useState(null);
-      const [error, setError] = useState(null);
-      const [apiKey, setApiKey] = useState('');
-      const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+  <div class="row">
+    <label for="yearSelect">年份</label>
+    <select id="yearSelect"></select>
 
-      const mag7Stocks = [
-        { symbol: 'AAPL', name: 'Apple' },
-        { symbol: 'MSFT', name: 'Microsoft' },
-        { symbol: 'GOOGL', name: 'Alphabet' },
-        { symbol: 'AMZN', name: 'Amazon' },
-        { symbol: 'NVDA', name: 'NVIDIA' },
-        { symbol: 'TSLA', name: 'Tesla' },
-        { symbol: 'META', name: 'Meta' }
-      ];
+    <label for="monthSelect">月份</label>
+    <select id="monthSelect">
+      <!-- 1~12 月 -->
+    </select>
 
-      const years = ['2020', '2021', '2022', '2023', '2024'];
-      const months = [
-        { value: '1', label: '1月' }, { value: '2', label: '2月' },
-        { value: '3', label: '3月' }, { value: '4', label: '4月' },
-        { value: '5', label: '5月' }, { value: '6', label: '6月' },
-        { value: '7', label: '7月' }, { value: '8', label: '8月' },
-        { value: '9', label: '9月' }, { value: '10', label: '10月' },
-        { value: '11', label: '11月' }, { value: '12', label: '12月' }
-      ];
+    <button id="runBtn" type="button">查詢</button>
+  </div>
 
-      const formatDate = (year, month, day) => {
-        const m = String(month).padStart(2, '0');
-        const d = String(day).padStart(2, '0');
-        return year + '-' + m + '-' + d;
+  <div id="status">請選擇年份與月份，然後按「查詢」。</div>
+
+  <canvas id="chart"></canvas>
+
+  <script type="module">
+    // ===== 基本設定 =====
+    const DEMO_MODE = true; // 若沒有可用 API，先設 true 看畫面。要接 API 改成 false。
+    const TICKERS = ["AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META"]; // 正確代碼
+    const yearSelect = document.getElementById("yearSelect");
+    const monthSelect = document.getElementById("monthSelect");
+    const runBtn = document.getElementById("runBtn");
+    const statusEl = document.getElementById("status");
+    const chartEl = document.getElementById("chart");
+
+    // ===== UI 初始化 =====
+    (function initUI(){
+      const now = new Date();
+      const thisYear = now.getUTCFullYear();
+      for(let y = thisYear; y >= thisYear - 10; y--){
+        const opt = document.createElement("option");
+        opt.value = String(y);
+        opt.textContent = String(y);
+        yearSelect.appendChild(opt);
+      }
+      for(let m = 1; m <= 12; m++){
+        const opt = document.createElement("option");
+        opt.value = String(m).padStart(2, "0");
+        opt.textContent = `${m}`;
+        monthSelect.appendChild(opt);
+      }
+      // 預設為上個月
+      const prev = new Date(Date.UTC(thisYear, now.getUTCMonth() - 1, 1));
+      yearSelect.value = String(prev.getUTCFullYear());
+      monthSelect.value = String(prev.getUTCMonth() + 1).padStart(2, "0");
+    })();
+
+    // ===== 工具：安全建立 ISO 日期（避免 2025-9-1 這種） =====
+    function ymdUTC(year, month/*1-12*/, day){
+      return new Date(Date.UTC(year, month - 1, day));
+    }
+    // 取得月份起訖（半開區間）
+    function getMonthRangeISO(year, month){ // month: "01" ~ "12"
+      const y = Number(year);
+      const m = Number(month);
+      const start = ymdUTC(y, m, 1);
+      const end = ymdUTC(y, m + 1, 1); // 自動跨年
+      return {
+        startISO: start.toISOString().slice(0,10), // YYYY-MM-DD
+        endISO: end.toISOString().slice(0,10)
       };
+    }
 
-      const getLastDayOfMonth = (year, month) => {
-        return new Date(year, month, 0).getDate();
-      };
+    // ===== 模擬／實際取價 =====
+    async function fetchStock(ticker, startISO, endISO){
+      if (DEMO_MODE){
+        // 產生穩定的假資料：開盤/收盤
+        // 報酬率大約 -10% ~ +10%
+        const seed = Array.from(ticker).reduce((s,c)=>s+c.charCodeAt(0),0) + Number(startISO.slice(8,10));
+        const rng = Math.sin(seed) * 10000;
+        const base = 100 + Math.abs(rng % 100); // 100~200
+        const pct = ((rng % 21) - 10) / 100;    // -0.10 ~ +0.10
+        return {
+          ticker,
+          startClose: base,
+          endClose: base * (1 + pct),
+          pct
+        };
+      }
 
-      const getPreviousMonthEnd = (year, month) => {
-        const prevMonth = month === 1 ? 12 : month - 1;
-        const prevYear = month === 1 ? year - 1 : year;
-        const lastDay = getLastDayOfMonth(prevYear, prevMonth);
-        return formatDate(prevYear, prevMonth, lastDay);
-      };
+      // ===== 這裡換成你的 API / 後端 proxy =====
+      // 範例（請自行替換為可用服務）：
+      // const url = `https://your-proxy.example.com/price-range?ticker=${encodeURIComponent(ticker)}&start=${startISO}&end=${endISO}`;
+      // const res = await fetch(url, { headers: { 'Authorization': `Bearer ${YOUR_TOKEN}` }});
+      // if(!res.ok) throw new Error(`${ticker} HTTP ${res.status}`);
+      // const data = await res.json();
+      // return { ticker, startClose: data.startClose, endClose: data.endClose, pct: (data.endClose - data.startClose)/data.startClose };
 
-      const getYearStart = (year) => {
-        return formatDate(year - 1, 12, 31);
-      };
+      throw new Error("請將 DEMO_MODE 設為 true，或實作你自己的 API 取價邏輯。");
+    }
 
-      const fetchStockPrice = async (symbol, targetDate, key) => {
-        try {
-          const target = new Date(targetDate);
-          const fromDate = new Date(target);
-          fromDate.setDate(fromDate.getDate() - 15);
-          
-          const fromStr = fromDate.toISOString().split('T')[0];
-          const toStr = target.toISOString().split('T')[0];
-          
-          const url = 'https://financialmodelingprep.com/api/v3/historical-price-full/' + symbol + '?from=' + fromStr + '&to=' + toStr + '&apikey=' + key;
-          
-          const response = await fetch(url);
-          
-          if (!response.ok) {
-            throw new Error('HTTP error! status: ' + response.status);
+    // ===== 批次查詢（含簡單節流/重試） =====
+    async function fetchAllWithThrottle(tickers, startISO, endISO){
+      const results = [];
+      for (const t of tickers){
+        let attempt = 0, ok = false;
+        while(attempt < 3 && !ok){
+          try{
+            // 簡單節流：每支等待 250ms，避免 API 速率限制
+            if (attempt === 0) await new Promise(r=>setTimeout(r, 250));
+            const r = await fetchStock(t, startISO, endISO);
+            results.push(r);
+            ok = true;
+          }catch(err){
+            attempt++;
+            if (attempt >= 3) {
+              throw new Error(`${t} 查詢失敗：${err.message}`);
+            }
+            await new Promise(r=>setTimeout(r, 500 * attempt));
           }
-          
-          const json = await response.json();
-
-          if (json.historical && json.historical.length > 0) {
-            const sortedData = json.historical.sort((a, b) => new Date(b.date) - new Date(a.date));
-            return sortedData[0].close;
-          }
-          
-          throw new Error('無法獲取股價數據');
-        } catch (err) {
-          console.error('獲取 ' + symbol + ' 股價失敗:', err);
-          throw err;
         }
-      };
+      }
+      return results;
+    }
 
-      const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-      const handleQuery = async () => {
-        if (!apiKey || apiKey.trim() === '') {
-          setError('請先輸入 Financial Modeling Prep API Key');
-          setShowApiKeyInput(true);
-          return;
-        }
-
-        setLoading(true);
-        setError(null);
-        setData(null);
-
-        try {
-          const year = parseInt(selectedYear);
-          const month = parseInt(selectedMonth);
-          
-          const lastDay = getLastDayOfMonth(year, month);
-          const currentMonthEnd = formatDate(year, month, lastDay);
-          const previousMonthEnd = getPreviousMonthEnd(year, month);
-          const yearStart = getYearStart(year);
-
-          const results = [];
-          let successCount = 0;
-          let failedStocks = [];
-
-          for (let i = 0; i < mag7Stocks.length; i++) {
-            const stock = mag7Stocks[i];
-            
-            try {
-              const currentPrice = await fetchStockPrice(stock.symbol, currentMonthEnd, apiKey);
-              await delay(300);
-              
-              const prevMonthPrice = await fetchStockPrice(stock.symbol, previousMonthEnd, apiKey);
-              await delay(300);
-              
-              const yearStartPrice = await fetchStockPrice(stock.symbol, yearStart, apiKey);
-              await delay(300);
-
-              const monthlyReturn = ((currentPrice - prevMonthPrice) / prevMonthPrice * 100);
-              const ytdReturn = ((currentPrice - yearStartPrice) / yearStartPrice * 100);
-
-              results.push({
-                symbol: stock.symbol,
-                name: stock.name,
-                monthlyReturn: monthlyReturn.toFixed(2),
-                ytdReturn: ytdReturn.toFixed(2),
-                currentPrice: currentPrice.toFixed(2),
-                prevMonthPrice: prevMonthPrice.toFixed(2),
-                yearStartPrice: yearStartPrice.toFixed(2)
-              });
-
-              successCount++;
-
-            } catch (err) {
-              console.error('處理 ' + stock.symbol + ' 時發生錯誤:', err);
-              failedStocks.push(stock.symbol);
-              results.push({
-                symbol: stock.symbol,
-                name: stock.name,
-                monthlyReturn: 'N/A',
-                ytdReturn: 'N/A',
-                currentPrice: 'N/A',
-                prevMonthPrice: 'N/A',
-                yearStartPrice: 'N/A'
-              });
+    // ===== Chart.js 繪圖 =====
+    let chart;
+    function renderChart(items, label){
+      const labels = items.map(d=>d.ticker);
+      const data = items.map(d=>Number((d.pct*100).toFixed(2)));
+      if (chart){ chart.destroy(); }
+      chart = new Chart(chartEl.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label,
+            data
+          }]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            y: { ticks: { callback: v => `${v}%` } }
+          },
+          plugins: {
+            tooltip: {
+              callbacks: {
+                label: (ctx)=> `${ctx.parsed.y}%`
+              }
             }
           }
-
-          setData(results);
-          
-          if (successCount === 0) {
-            setError('所有股票查詢失敗。請檢查 API Key 是否正確，或網路連線。');
-          } else if (failedStocks.length > 0) {
-            setError('部分股票查詢失敗: ' + failedStocks.join(', ') + '。其他股票數據正常顯示。');
-          }
-
-        } catch (err) {
-          setError('查詢失敗，請檢查網路連線或 API Key 是否正確');
-          console.error('查詢錯誤:', err);
-        } finally {
-          setLoading(false);
         }
-      };
+      });
+    }
 
-      const exportToCSV = () => {
-        if (!data) return;
+    // ===== 事件：查詢 =====
+    runBtn.addEventListener("click", async ()=>{
+      const year = yearSelect.value;
+      const month = monthSelect.value;
+      const { startISO, endISO } = getMonthRangeISO(year, month);
+      statusEl.className = "";
+      statusEl.textContent = `查詢中… (${startISO} ~ ${endISO})`;
 
-        const headers = ['股票代碼', '股票名稱', '月度報酬率(%)', 'YTD報酬率(%)', '當前價格($)', '上月價格($)', '年初價格($)'];
-        const csvContent = [
-          headers.join(','),
-          ...data.map(row => 
-            row.symbol + ',' + row.name + ',' + row.monthlyReturn + ',' + row.ytdReturn + ',' + row.currentPrice + ',' + row.prevMonthPrice + ',' + row.yearStartPrice
-          )
-        ].join('\\n');
-
-        const blob = new Blob(['\\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = 'Mag7_Returns_' + selectedYear + '_' + selectedMonth + '.csv';
-        link.click();
-      };
-
-      const chartData = data?.filter(item => item.monthlyReturn !== 'N/A').map(item => ({
-        name: item.symbol,
-        月度: parseFloat(item.monthlyReturn),
-        YTD: parseFloat(item.ytdReturn)
-      }));
-
-      return React.createElement('div', { className: 'min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6' },
-        React.createElement('div', { className: 'max-w-7xl mx-auto' },
-          React.createElement('div', { className: 'bg-white rounded-xl shadow-lg p-6 mb-6' },
-            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-              React.createElement('svg', { className: 'w-8 h-8 text-indigo-600', fill: 'none', stroke: 'currentColor', viewBox: '0 0 24 24' },
-                React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6' })
-              ),
-              React.createElement('h1', { className: 'text-3xl font-bold text-gray-800' }, '美股七巨頭報酬率分析')
-            ),
-            React.createElement('p', { className: 'text-gray-600' }, '查詢 Magnificent 7 的月度及年初至今報酬率（真實股價數據）')
-          ),
-
-          React.createElement('div', { className: 'bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6' },
-            React.createElement('div', { className: 'flex items-start gap-3' },
-              React.createElement('svg', { className: 'w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5', fill: 'none', stroke: 'currentColor', viewBox: '0 0 24 24' },
-                React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' })
-              ),
-              React.createElement('div', { className: 'flex-1' },
-                React.createElement('p', { className: 'font-semibold text-blue-900 mb-2' }, '使用說明：'),
-                React.createElement('ol', { className: 'text-sm text-blue-800 space-y-2 ml-4 list-decimal' },
-                  React.createElement('li', null, '前往 ', React.createElement('a', { href: 'https://site.financialmodelingprep.com/developer/docs', target: '_blank', rel: 'noopener noreferrer', className: 'text-blue-600 underline font-medium' }, 'Financial Modeling Prep'), ' 註冊免費帳號'),
-                  React.createElement('li', null, '註冊後會立即獲得 API Key（免費額度：每日250次API呼叫）'),
-                  React.createElement('li', null, '將 API Key 輸入下方欄位'),
-                  React.createElement('li', null, '選擇年月後即可查詢真實股價數據')
-                )
-              )
-            )
-          ),
-
-          React.createElement('div', { className: 'bg-white rounded-xl shadow-lg p-6 mb-6' },
-            React.createElement('div', { className: 'flex items-center gap-4 mb-4' },
-              React.createElement('svg', { className: 'w-5 h-5 text-indigo-600', fill: 'none', stroke: 'currentColor', viewBox: '0 0 24 24' },
-                React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' })
-              ),
-              React.createElement('h2', { className: 'text-xl font-semibold text-gray-800' }, 'API Key 設定'),
-              !showApiKeyInput && apiKey && React.createElement('span', { className: 'text-green-600 text-sm font-medium' }, '✓ 已設定')
-            ),
-            
-            (!apiKey || showApiKeyInput) ?
-              React.createElement('div', { className: 'flex gap-3' },
-                React.createElement('input', {
-                  type: 'text',
-                  value: apiKey,
-                  onChange: (e) => setApiKey(e.target.value),
-                  placeholder: '請輸入您的 Financial Modeling Prep API Key',
-                  className: 'flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent'
-                }),
-                React.createElement('button', {
-                  onClick: () => {
-                    if (apiKey.trim()) {
-                      setShowApiKeyInput(false);
-                      setError(null);
-                    }
-                  },
-                  className: 'px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium'
-                }, '確認')
-              ) :
-              React.createElement('div', { className: 'flex items-center gap-3' },
-                React.createElement('span', { className: 'text-gray-600' }, 'API Key: ' + apiKey.substring(0, 8) + '***********'),
-                React.createElement('button', {
-                  onClick: () => setShowApiKeyInput(true),
-                  className: 'text-indigo-600 hover:text-indigo-700 text-sm font-medium'
-                }, '修改')
-              )
-          ),
-
-          React.createElement('div', { className: 'bg-white rounded-xl shadow-lg p-6 mb-6' },
-            React.createElement('div', { className: 'flex items-center gap-4 mb-4' },
-              React.createElement('svg', { className: 'w-5 h-5 text-indigo-600', fill: 'none', stroke: 'currentColor', viewBox: '0 0 24 24' },
-                React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' })
-              ),
-              React.createElement('h2', { className: 'text-xl font-semibold text-gray-800' }, '選擇查詢期間')
-            ),
-            
-            React.createElement('div', { className: 'flex flex-wrap gap-4 items-end' },
-              React.createElement('div', { className: 'flex-1 min-w-[150px]' },
-                React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '年份'),
-                React.createElement('select', {
-                  value: selectedYear,
-                  onChange: (e) => setSelectedYear(e.target.value),
-                  className: 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent',
-                  disabled: loading
-                }, years.map(year => React.createElement('option', { key: year, value: year }, year + '年')))
-              ),
-
-              React.createElement('div', { className: 'flex-1 min-w-[150px]' },
-                React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '月份'),
-                React.createElement('select', {
-                  value: selectedMonth,
-                  onChange: (e) => setSelectedMonth(e.target.value),
-                  className: 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent',
-                  disabled: loading
-                }, months.map(month => React.createElement('option', { key: month.value, value: month.value }, month.label)))
-              ),
-
-              React.createElement('button', {
-                onClick: handleQuery,
-                disabled: loading || !apiKey,
-                className: 'px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed font-medium'
-              }, loading ? '查詢中...' : '查詢報酬率'),
-
-              data && React.createElement('button', {
-                onClick: exportToCSV,
-                className: 'px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium'
-              }, '匯出CSV')
-            ),
-
-            loading && React.createElement('div', { className: 'mt-4 flex items-center gap-2 text-indigo-600' },
-              React.createElement('div', { className: 'animate-spin rounded-full h-5 w-5 border-b-2 border-indigo-600' }),
-              React.createElement('span', null, '正在從 Financial Modeling Prep 獲取真實股價數據...')
-            )
-          ),
-
-          error && React.createElement('div', { className: 'bg-red-50 border border-red-200 rounded-xl p-4 mb-6' },
-            React.createElement('p', { className: 'text-red-800 font-medium' }, error),
-            error.includes('API Key') && React.createElement('button', {
-              onClick: () => setShowApiKeyInput(true),
-              className: 'mt-2 text-sm text-red-700 underline hover:text-red-800'
-            }, '點此重新輸入 API Key')
-          ),
-
-          data && React.createElement('div', { className: 'bg-white rounded-xl shadow-lg p-6 mb-6 overflow-x-auto' },
-            React.createElement('h2', { className: 'text-xl font-semibold text-gray-800 mb-4' }, selectedYear + '年' + selectedMonth + '月報酬率數據'),
-            React.createElement('table', { className: 'w-full' },
-              React.createElement('thead', null,
-                React.createElement('tr', { className: 'bg-indigo-50 border-b-2 border-indigo-200' },
-                  React.createElement('th', { className: 'px-4 py-3 text-left text-sm font-semibold text-gray-700' }, '股票代號'),
-                  React.createElement('th', { className: 'px-4 py-3 text-left text-sm font-semibold text-gray-700' }, '公司名稱'),
-                  React.createElement('th', { className: 'px-4 py-3 text-right text-sm font-semibold text-gray-700' }, '當前價格 ($)'),
-                  React.createElement('th', { className: 'px-4 py-3 text-right text-sm font-semibold text-gray-700' }, '月度報酬率 (%)'),
-                  React.createElement('th', { className: 'px-4 py-3 text-right text-sm font-semibold text-gray-700' }, 'YTD報酬率 (%)')
-                )
-              ),
-              React.createElement('tbody', null,
-                data.map((row, index) => React.createElement('tr', { key: row.symbol, className: index % 2 === 0 ? 'bg-gray-50' : 'bg-white' },
-                  React.createElement('td', { className: 'px-4 py-3 font-mono font-semibold text-indigo-600' }, row.symbol),
-                  React.createElement('td', { className: 'px-4 py-3 text-gray-700' }, row.name),
-                  React.createElement('td', { className: 'px-4 py-3 text-right text-gray-700' }, row.currentPrice !== 'N/A' ? '$' + row.currentPrice : 'N/A'),
-                  React.createElement('td', {
-                    className: 'px-4 py-3 text-right font-semibold ' + (
-                      row.monthlyReturn === 'N/A' ? 'text-gray-400' :
-                      parseFloat(row.monthlyReturn) >= 0 ? 'text-green-600' : 'text-red-600'
-                    )
-                  }, (row.monthlyReturn !== 'N/A' && parseFloat(row.monthlyReturn) >= 0 ? '+' : '') + row.monthlyReturn + (row.monthlyReturn !== 'N/A' ? '%' : '')),
-                  React.createElement('td', {
-                    className: 'px-4 py-3 text-right font-semibold ' + (
-                      row.ytdReturn === 'N/A' ? 'text-gray-400' :
-                      parseFloat(row.ytdReturn) >= 0 ? 'text-green-600' : 'text-red-600'
-                    )
-                  }, (row.ytdReturn !== 'N/A' && parseFloat(row.ytdReturn) >= 0 ? '+' : '') + row.ytdReturn + (row.ytdReturn !== 'N/A' ? '%' : ''))
-                ))
-              )
-            )
-          ),
-
-          data && chartData && chartData.length > 0 && React.createElement('div', { className: 'bg-white rounded-xl shadow-lg p-6 mb-6' },
-            React.createElement('h2', { className: 'text-xl font-semibold text-gray-800 mb-4' }, '報酬率比較圖'),
-            React.createElement(ResponsiveContainer, { width: '100%', height: 400 },
-              React.createElement(LineChart, { data: chartData },
-                React.createElement(CartesianGrid, { strokeDasharray: '3 3' }),
-                React.createElement(XAxis, { dataKey: 'name' }),
-                React.createElement(YAxis, null),
-                React.createElement(Tooltip, null),
-                React.createElement(Legend, null),
-                React.createElement(Line, { type: 'monotone', dataKey: '月度', stroke: '#8b5cf6', strokeWidth: 2, name: '月度報酬率' }),
-                React.createElement(Line, { type: 'monotone', dataKey: 'YTD', stroke: '#3b82f6', strokeWidth: 2, name: 'YTD報酬率' })
-              )
-            )
-          ),
-
-          data && React.createElement('div', { className: 'bg-green-50 border border-green-200 rounded-xl p-4' },
-            React.createElement('h3', { className: 'font-semibold text-green-900 mb-2' }, '✓ 真實數據說明'),
-            React.createElement('ul', { className: 'text-sm text-green-800 space-y-1' },
-              React.createElement('li', null, '• 數據來源：Financial Modeling Prep（專業金融數據供應商）'),
-              React.createElement('li', null, '• 月度報酬率：前一個月最後交易日收盤價 → 本月最後交易日收盤價'),
-              React.createElement('li', null, '• YTD報酬率：前一年最後交易日收盤價 → 本月最後交易日收盤價'),
-              React.createElement('li', null, '• 數據準確性：所有數據均為真實歷史股價，無任何模擬或估算')
-            )
-          ),
-
-          !data && !loading && React.createElement('div', { className: 'bg-white rounded-xl shadow-lg p-12 text-center' },
-            React.createElement('svg', { className: 'w-16 h-16 text-gray-300 mx-auto mb-4', fill: 'none', stroke: 'currentColor', viewBox: '0 0 24 24' },
-              React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6' })
-            ),
-            React.createElement('h3', { className: 'text-xl text-gray-600 mb-2' }, '準備就緒！'),
-            React.createElement('p', { className: 'text-gray-500' }, '請先設定 API Key，然後選擇年份和月份開始查詢')
-          )
-        )
-      );
-    };
-
-    ReactDOM.render(React.createElement(Mag7ReturnsTracker), document.getElementById('root'));
+      try{
+        const rows = await fetchAllWithThrottle(TICKERS, startISO, endISO);
+        // 單月報酬 = (月末收盤 - 月初收盤) / 月初收盤
+        rows.sort((a,b)=>a.ticker.localeCompare(b.ticker));
+        renderChart(rows, `${year}/${month} 單月報酬`);
+        statusEl.className = "ok";
+        statusEl.textContent = "完成";
+      }catch(err){
+        console.error(err);
+        statusEl.className = "error";
+        statusEl.textContent = `查詢失敗：${err.message}`;
+      }
+    });
   </script>
 </body>
 </html>
