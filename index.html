@@ -62,12 +62,15 @@
     <tbody></tbody>
   </table>
 
-  <div class="note">資料來源：Financial Modeling Prep。若遇 403/402，多半是權限或流量控管；本頁面已自動切換較寬鬆的查詢方式並合併請求以降低風險。</div>
+  <div class="note">
+    資料來源：Financial Modeling Prep。這版以 <code>timeseries=500</code> 批量抓取，若失敗會自動改逐檔（含節流）以降低 403/402 風險。
+  </div>
 
   <script>
     // ===== 固定使用真實數據（不要 DEMO）=====
     const API_KEY = "7xTUMOCGtNmymONqH2VM2i1OJE4qAU47";
-    const FMP = "https://financialmodelingprep.com/api/v3";
+    // 若你之後改走 proxy，將 FMP_BASE 換成你的 proxy URL（前端就不要再帶 apikey）
+    const FMP_BASE = "https://financialmodelingprep.com/api/v3";
     const TICKERS = ["AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META"];
 
     const yearSelect  = document.getElementById("yearSelect");
@@ -108,21 +111,20 @@
       const end   = ymdUTC(+year, +month + 1, 1);
       return { startISO: start.toISOString().slice(0,10), endISO: end.toISOString().slice(0,10) };
     }
-    function getYearStartISO(year){ return ymdUTC(+year, 1, 1).toISOString().slice(0,10); }
     function pctStr(n){ return (n*100).toFixed(2) + "%"; }
     function money(n){ return Number(n).toFixed(2); }
     function keyOf(y,m){ return `${y}-${m}`; }
 
-    // ---- 解析 helpers ----
+    // ---- 將一年內的日資料，計算出當月與YTD ----
     function computeForSymbol(rowsAllYear, year, month){
-      // rowsAllYear: 舊->新
+      // rowsAllYear 需為舊->新排序
       const { startISO: mStartISO, endISO: mEndISO } = getMonthRangeISO(year, month);
       const monthRows = rowsAllYear.filter(d => d.date >= mStartISO && d.date < mEndISO);
       if (monthRows.length === 0) return null;
 
       const monthFirst = monthRows[0];
       const monthLast  = monthRows[monthRows.length - 1];
-      const ytdFirst   = rowsAllYear[0];
+      const ytdFirst   = rowsAllYear[0]; // 這批資料中最早一筆（接近年初）
 
       const monthStartClose = Number(monthFirst.close);
       const monthEndClose   = Number(monthLast.close);
@@ -139,34 +141,9 @@
       };
     }
 
-    // ---- 主要抓法 #1：批量 + from/to（成功則最準確）----
-    async function fetchBatchByRange(symbols, year, month){
-      const { endISO } = getMonthRangeISO(year, month);
-      const from = getYearStartISO(year);
-      const url = `${FMP}/historical-price-full/${encodeURIComponent(symbols.join(','))}?from=${from}&to=${endISO}&apikey=${API_KEY}`;
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) throw new Error(`RANGE ${res.status}`);
-      const json = await res.json();
-
-      // 回傳可能是 historicalStockList（批量）或 historical（單檔）
-      if (Array.isArray(json?.historicalStockList)) {
-        const out = {};
-        for (const block of json.historicalStockList){
-          const list = Array.isArray(block?.historical) ? block.historical.slice() : [];
-          list.sort((a,b)=> a.date.localeCompare(b.date));
-          out[block.symbol] = list;
-        }
-        return out;
-      } else if (Array.isArray(json?.historical)) {
-        const list = json.historical.slice().sort((a,b)=> a.date.localeCompare(b.date));
-        return { [symbols[0]]: list };
-      }
-      throw new Error("RANGE PARSE");
-    }
-
-    // ---- 主要抓法 #2（備援）：批量 + timeseries=500（不帶區間，再前端篩）----
+    // ---- 主要抓法：批量 timeseries=500（不帶 from/to）----
     async function fetchBatchByTimeseries(symbols){
-      const url = `${FMP}/historical-price-full/${encodeURIComponent(symbols.join(','))}?timeseries=500&apikey=${API_KEY}`;
+      const url = `${FMP_BASE}/historical-price-full/${encodeURIComponent(symbols.join(','))}?timeseries=500&apikey=${API_KEY}`;
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`TS ${res.status}`);
       const json = await res.json();
@@ -180,9 +157,9 @@
       return out;
     }
 
-    // ---- 最終備援：逐檔 timeseries=500（最慢、最保險）----
+    // ---- 備援：逐檔 timeseries=500（最慢、最保險）----
     async function fetchOneTimeseries(symbol){
-      const url = `${FMP}/historical-price-full/${encodeURIComponent(symbol)}?timeseries=500&apikey=${API_KEY}`;
+      const url = `${FMP_BASE}/historical-price-full/${encodeURIComponent(symbol)}?timeseries=500&apikey=${API_KEY}`;
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`ONE ${symbol} ${res.status}`);
       const json = await res.json();
@@ -192,23 +169,17 @@
     }
 
     async function fetchAllSymbols(year, month){
-      // 1) 先試「批量 + 區間」
+      // 先試批量（最穩、最省額度）
       try {
-        return await fetchBatchByRange(TICKERS, year, month);
-      } catch (e1){
-        // 2) 退而求其次：批量 timeseries=500
-        try {
-          return await fetchBatchByTimeseries(TICKERS);
-        } catch (e2){
-          // 3) 最後一招：逐檔 timeseries=500
-          const out = {};
-          for (const s of TICKERS){
-            // 簡單節流
-            await new Promise(r=>setTimeout(r, 200));
-            out[s] = await fetchOneTimeseries(s);
-          }
-          return out;
+        return await fetchBatchByTimeseries(TICKERS);
+      } catch (e){
+        // 若批量失敗，逐檔備援 + 簡單節流
+        const out = {};
+        for (const s of TICKERS){
+          await new Promise(r=>setTimeout(r, 250));
+          out[s] = await fetchOneTimeseries(s);
         }
+        return out;
       }
     }
 
@@ -218,10 +189,7 @@
         const list = symbolToAllYearRows[s] || [];
         const comp = computeForSymbol(list, year, month);
         if (!comp) continue;
-        rows.push({
-          ticker: s,
-          ...comp
-        });
+        rows.push({ ticker: s, ...comp });
       }
       rows.sort((a,b)=> a.ticker.localeCompare(b.ticker));
       return rows;
@@ -273,12 +241,12 @@
       const year  = yearSelect.value;
       const month = monthSelect.value;
       const mode  = modeSelect.value;
-      const key   = `${year}-${month}`;
+      const key   = keyOf(year, month);
 
-      showStatus("", `查詢中…（合併請求，降低 403 風險）`);
+      showStatus("", "查詢中…（合併/備援邏輯啟用）");
       tbl.style.display = "none";
 
-      try {
+      try{
         let payload = cache.get(key);
         if (!payload){
           const symbolToAllYear = await fetchAllSymbols(year, month);
@@ -290,14 +258,13 @@
         renderChart(payload.rows, year, month, mode);
         renderTable(payload.rows);
         showStatus("ok", "完成（LIVE）");
-      } catch (err){
+      }catch(err){
         console.error(err);
-        // 分類訊息
         const msg = String(err.message || err);
         if (msg.includes("402") || msg.includes("429")) {
           showStatus("error", "查詢失敗：可能超出免費額度或請求過於頻繁（402/429）。請稍後再試。");
         } else if (msg.includes("403")) {
-          showStatus("error", "查詢失敗：403 Forbidden（金鑰權限或來源被拒）。已嘗試改用寬鬆查詢仍失敗。");
+          showStatus("error", "查詢失敗：403 Forbidden（來源或金鑰被拒）。建議改用 Proxy 後端轉發。");
         } else if (msg.includes("PARSE")) {
           showStatus("error", "查詢失敗：API 回傳格式異常（PARSE）。");
         } else {
@@ -309,7 +276,7 @@
     runBtn.addEventListener("click", handleQuery);
     modeSelect.addEventListener("change", ()=>{
       const y = yearSelect.value, m = monthSelect.value;
-      const payload = cache.get(`${y}-${m}`);
+      const payload = cache.get(keyOf(y, m));
       if (payload){
         renderChart(payload.rows, y, m, modeSelect.value);
         showStatus("ok", "完成（切換顯示｜LIVE）");
